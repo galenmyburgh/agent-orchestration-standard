@@ -4,6 +4,7 @@
 // Copies (into plugin/, never editing the originals):
 //   ../monitor.mjs           -> monitor.mjs           (patched: data dir)
 //   ../hooks/aos-hook.mjs    -> hooks/aos-hook.mjs    (patched: data dir)
+//   ../ship/aos-ship.mjs     -> ship/aos-ship.mjs     (patched: data dir)
 //   ../ui/                   -> ui/
 //   ../cli/                  -> cli/                  (only if present)
 // plugin/defaults/ (seeded config.json / prices.json) is tracked source and is not generated: live/ holds personal
@@ -27,6 +28,10 @@ const PATCHES = {
   'hooks/aos-hook.mjs': {
     from: "const dir = process.env.AOS_LIVE_DIR || path.join(root, 'live');",
     to: `const dir = process.env.AOS_LIVE_DIR || (process.env.CLAUDE_PLUGIN_DATA ? path.join(process.env.CLAUDE_PLUGIN_DATA, 'live') : path.join(root, 'live')); // ${PATCH_NOTE}`,
+  },
+  'ship/aos-ship.mjs': {
+    from: "const LIVE = process.env.AOS_LIVE_DIR || path.join(ROOT, 'live');",
+    to: `const LIVE = process.env.AOS_LIVE_DIR || (process.env.CLAUDE_PLUGIN_DATA ? path.join(process.env.CLAUDE_PLUGIN_DATA, 'live') : path.join(ROOT, 'live')); // ${PATCH_NOTE}`,
   },
   'monitor.mjs': {
     from: "const LIVE = process.env.AOS_LIVE_DIR || path.join(ROOT, 'live');",
@@ -100,6 +105,7 @@ function build() {
   // Monitor and hook: copied from the originals, with the data-dir patch.
   copyPatched('monitor.mjs', 'monitor.mjs');
   copyPatched('hooks/aos-hook.mjs', 'hooks/aos-hook.mjs');
+  copyPatched('ship/aos-ship.mjs', 'ship/aos-ship.mjs');
 
   // UI (whole folder), and CLI if the other agent has created it.
   syncDir(path.join(REPO, 'ui'), 'ui');

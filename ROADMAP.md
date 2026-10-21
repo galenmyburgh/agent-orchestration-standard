@@ -9,6 +9,9 @@
   - Web UI (project graph, drawers, replay scrubber, cost readout, light/dark themes), terminal UI (`aos-dash`), a read-only MCP server (7 tools), an optional status line and a branded macOS notifier.
   - `make install` / `make doctor` / `make test`.
 
+- **Hub** (`hub/`, `ship/`): one dashboard per person across several machines; a shipper on each machine, an
+  ingest server with machine tokens, and the monitor in hub mode.
+
 ## Known limitations
 
 - **Replay is approximate for tokens.** Replayed agent states, alerts and conflicts are rebuilt from the event log at the chosen time, but token totals come from the transcripts as they are now.
