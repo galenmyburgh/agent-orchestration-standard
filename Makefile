@@ -11,7 +11,7 @@ AOS        := node scripts/aos.mjs
 ENSURE     := CLAUDE_PLUGIN_ROOT="$(REPO)/plugin" CLAUDE_PLUGIN_DATA="$(DATA)" AOS_PORT=$(PORT) node plugin/hooks/ensure-monitor.mjs
 
 .DEFAULT_GOAL := help
-.PHONY: help install uninstall build validate test doctor start stop restart open demo link unlink statusline statusline-off notifier screenshots
+.PHONY: help install uninstall build validate test doctor start stop restart open demo link unlink statusline statusline-off notifier screenshots ship ship-status ship-stop
 
 help: ## Show this list
 	@echo "AOS: Claude Code live dashboard"; echo
@@ -53,6 +53,7 @@ test: ## Run every test suite
 	@set -o pipefail; echo "==> conformance"; node conformance/validate.mjs --selftest | tail -1
 	@set -o pipefail; echo "==> terminal dashboard"; node cli/test.mjs | tail -1
 	@set -o pipefail; echo "==> MCP server"; node plugin/mcp/test.mjs | tail -1
+	@set -o pipefail; echo "==> hub (shipper -> ingest -> monitor)"; node hub/test.mjs | tail -1
 	@set -o pipefail; echo "==> notifier"; node plugin/notify/test.mjs | tail -1
 	@echo "==> theme contrast"; out="$$(node ui/theme-tokens.test.mjs)" || { echo "$$out"; exit 1; }; echo "$$out" | head -1
 	@echo "==> orchestrator engine (fake claude)"; out="$$(node --test orchestrator/test/*.test.mjs 2>&1)" || { echo "$$out" | grep -E "^not ok|error:" | head -20; exit 1; }; echo "$$out" | grep -E '^# (pass|fail)' | tr '\n' ' '; echo
@@ -85,6 +86,17 @@ statusline: ## (optional) Show an AOS summary in Claude Code's status line (edit
 
 statusline-off: ## Remove the AOS status line
 	@$(AOS) statusline-off
+
+ship: ## Send this machine's activity to a central hub: make ship URL=https://<hub>/ingest (paste the machine token)
+	@test -n "$(URL)" || { echo "usage: make ship URL=https://<hub>/ingest"; exit 1; }
+	@AOS_LIVE_DIR="$(DATA)/live" node plugin/ship/aos-ship.mjs setup "$(URL)"
+	@CLAUDE_PLUGIN_ROOT="$(REPO)/plugin" CLAUDE_PLUGIN_DATA="$(DATA)" AOS_NO_AUTOSTART= node plugin/hooks/ensure-monitor.mjs; sleep 1; AOS_LIVE_DIR="$(DATA)/live" node plugin/ship/aos-ship.mjs status
+
+ship-status: ## Show whether the hub shipper is running and when it last sent
+	@AOS_LIVE_DIR="$(DATA)/live" node plugin/ship/aos-ship.mjs status
+
+ship-stop: ## Stop the hub shipper (it starts again with the next session while ship.json exists)
+	@AOS_LIVE_DIR="$(DATA)/live" node plugin/ship/aos-ship.mjs stop
 
 notifier: ## (macOS) Build the branded notification app
 	@node plugin/notify/build-notifier.mjs 2>&1 | tail -2

@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 // AOS dashboard autostart (SessionStart hook, registered async). Idempotent:
-// starts the local monitor only if nothing answers on its port. Binds nothing itself.
+// starts the local monitor only if nothing answers on its port, and the hub shipper when <live>/ship.json exists
+// (ship/aos-ship.mjs; it keeps a single instance itself). Binds nothing itself.
 // Never writes to stdout, always exits 0. AOS_NO_AUTOSTART=1 disables it entirely.
 import fs from 'node:fs';
 import http from 'node:http';
@@ -84,9 +85,27 @@ function releaseLock() {
   try { fs.unlinkSync(LOCK); } catch {}
 }
 
+// Hub shipper: only when set up (aos-ship setup), and only if its pid file doesn't name a live process.
+function ensureShipper() {
+  try {
+    const entry = path.join(ROOT, 'ship', 'aos-ship.mjs');
+    if (!fs.existsSync(path.join(LIVE, 'ship.json')) || !fs.existsSync(entry)) return;
+    const pid = Number(fs.existsSync(path.join(LIVE, 'ship.pid')) ? fs.readFileSync(path.join(LIVE, 'ship.pid'), 'utf8') : '');
+    if (pid) { try { process.kill(pid, 0); return; } catch (e) { if (e.code === 'EPERM') return; } }
+    const logFile = path.join(LIVE, 'ship.log');
+    try { if (fs.statSync(logFile).size > 1024 * 1024) fs.truncateSync(logFile, 0); } catch {}
+    const out = fs.openSync(logFile, 'a', 0o600);
+    const child = spawn(process.execPath, [entry], { detached: true, stdio: ['ignore', out, out], env: { ...process.env, AOS_LIVE_DIR: LIVE } });
+    child.on('error', () => {});
+    child.unref();
+    fs.closeSync(out);
+  } catch {}
+}
+
 async function main() {
   if (process.env.AOS_NO_AUTOSTART === '1') return;
   seedDefaults(); // always seed first so the data dir has config/prices even when a monitor already answers
+  ensureShipper();
   if (await alive()) return;
   if (!acquireLock()) { await waitForMonitor(WAIT_MS); return; } // another session is starting it
   try {

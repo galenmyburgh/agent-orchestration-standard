@@ -1,5 +1,6 @@
 // AOS-1 read-only live monitor: folds Claude Code hook events (live/hook-events.ndjson) into an AOS-1 /api/state view.
-// Zero dependencies, Node 18+ ESM. Binds 127.0.0.1 only.
+// Zero dependencies, Node 18+ ESM. Binds 127.0.0.1 only, unless AOS_BIND is set (hub mode: inside a container behind a proxy,
+// reading the per-user log that hub/ingest.mjs writes; see hub/README.md).
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -13,7 +14,9 @@ const UI = path.join(ROOT, 'ui');
 const LIVE = process.env.AOS_LIVE_DIR || (process.env.CLAUDE_PLUGIN_DATA ? path.join(process.env.CLAUDE_PLUGIN_DATA, 'live') : path.join(ROOT, 'live')); // [build patch: plugin data dir]
 const FILE = path.join(LIVE, 'hook-events.ndjson');
 const PORT = (() => { const n = Number(process.env.PORT); return Number.isInteger(n) && n > 0 && n < 65536 ? n : 4318; })();
-const HOST = '127.0.0.1';
+const HOST = process.env.AOS_BIND || '127.0.0.1';
+// hub mode: the public hostnames this monitor is served on, accepted in Host/Origin besides localhost
+const ALLOWED_HOSTS = new Set(String(process.env.AOS_ALLOWED_HOSTS || '').toLowerCase().split(',').map((h) => h.trim()).filter(Boolean));
 const RUN_S = 900, SESSION_TTL_S = 3600, STALE_SUB_S = 600, INTERVAL_S = 30, TAIL_LINES = 2000, TAIL_BYTES = 1024 * 1024;
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png',
@@ -94,10 +97,32 @@ function usd(u, model) {
 const MAX_RECS = 50000;
 let recs = [], off = 0, ino = null, carry = Buffer.alloc(0), ingestSig = '';
 const tpSess = new Map(), tpAgent = new Map(); // sid -> transcript path ; sid:agent_id -> path
+// hub mode: token totals shipped from each machine as 'Usage' records (the transcripts stay on the machines).
+// Key 'remote:<sid>[:<agent_id>]' -> { tot, by, model }, the same shape pump() returns.
+const REMOTE = new Map();
+function usage1(r) {
+  if (typeof r.sid !== 'string' || !r.by || typeof r.by !== 'object' || Array.isArray(r.by)) return;
+  const t = { tot: zero(), by: Object.create(null), model: typeof r.model === 'string' ? r.model.slice(0, 80) : null };
+  const n = (v) => (Number.isFinite(+v) && +v > 0 ? +v : 0);
+  for (const m of Object.keys(r.by).slice(0, 20)) {
+    const u = r.by[m];
+    if (!u || typeof u !== 'object') continue;
+    const d = { input: n(u.input), output: n(u.output), cache_read: n(u.cache_read), cache_write: n(u.cache_write) };
+    add(t.by[m.slice(0, 80)] = t.by[m.slice(0, 80)] || zero(), d); add(t.tot, d);
+  }
+  const k = 'remote:' + r.sid + (typeof r.agent_id === 'string' && r.agent_id ? ':' + r.agent_id : '');
+  REMOTE.delete(k); REMOTE.set(k, t);
+  if (REMOTE.size > 5000) REMOTE.delete(REMOTE.keys().next().value);
+}
 function ingest1(r) {
   if (!r || typeof r !== 'object' || typeof r.ts !== 'string' || !Number.isFinite(Date.parse(r.ts))) return;
   if ((r.sid != null && typeof r.sid !== 'string') || (r.f != null && typeof r.f !== 'string')) return; // fold() needs strings here
-  recs.push(r);
+  if (r.ev === 'Usage') return usage1(r);
+  if (recs.length && r.ts < recs[recs.length - 1].ts) { // hub mode: a machine catching up after being offline; keep recs in time order
+    let lo = 0, hi = recs.length;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (recs[mid].ts <= r.ts) lo = mid + 1; else hi = mid; }
+    recs.splice(lo, 0, r);
+  } else recs.push(r);
   if (typeof r.tp === 'string' && r.tp.endsWith('.jsonl') && path.isAbsolute(r.tp) && r.sid) {
     if (r.ev === 'SubagentStop' && r.agent_id) tpAgent.set(r.sid + ':' + r.agent_id, r.tp); else if (!r.agent_id) tpSess.set(r.sid, r.tp);
   }
@@ -128,6 +153,7 @@ function ingest() {
 // ---------- transcript usage (counts + model only) ----------
 const TR = new Map(), seenMsg = new Set();
 function pump(p) {
+  if (p.startsWith('remote:')) return REMOTE.get(p) || null;
   let t = TR.get(p);
   if (!t) { t = { off: 0, carry: Buffer.alloc(0), tot: zero(), by: Object.create(null), model: null, last: 0 }; TR.set(p, t); if (TR.size > 500) TR.delete(TR.keys().next().value); }
   const now = Date.now();
@@ -163,6 +189,8 @@ function pump(p) {
   return t;
 }
 function trPath(sid, agentId) {
+  const rk = 'remote:' + sid + (agentId ? ':' + agentId : '');
+  if (REMOTE.has(rk)) return rk;
   if (agentId) {
     const k = sid + ':' + agentId;
     if (tpAgent.has(k)) return tpAgent.get(k);
@@ -310,7 +338,7 @@ function fold(list, ref) {
   for (const r of list) {
     const t = Date.parse(r.ts), sid = r.sid || 'unknown', name = r.ev;
     let s = sessions.get(sid);
-    if (!s) { s = { sid, cwd: r.cwd || '', id: 'Claude Code·' + sid.slice(0, 4), last: t, active: 0, ended: false, act: 0, wait: false, tools: mkTools(), first: t, seg: null, closed: 0 }; sessions.set(sid, s); }
+    if (!s) { s = { sid, cwd: r.cwd || '', id: (typeof r.host === 'string' && r.host ? r.host : 'Claude Code') + '·' + sid.slice(0, 4), last: t, active: 0, ended: false, act: 0, wait: false, tools: mkTools(), first: t, seg: null, closed: 0 }; sessions.set(sid, s); }
     if (r.cwd) s.cwd = r.cwd;
     if (typeof r.cwd === 'string') { const c = r.cwd.trim().slice(0, 200); if (c) { let m = cw.get(sid); if (!m) cw.set(sid, m = new Map()); m.set(c, (m.get(c) || 0) + 1); } }
     const cp = normCwdp(r.cwdp); if (cp) { let m = cwp.get(sid); if (!m) cwp.set(sid, m = new Map()); m.set(cp, (m.get(cp) || 0) + 1); }
@@ -485,7 +513,7 @@ function fold(list, ref) {
 
   // cost: totals across every transcript referenced by agents in this window (incl. finished ones)
   const by_model = Object.create(null), tot = zero(); // model ids come from transcripts: no prototype keys
-  for (const p of used) { const t = TR.get(p); if (!t) continue; for (const [m, u] of Object.entries(t.by)) add(by_model[m] = by_model[m] || { ...zero(), _p: 1 }, u); }
+  for (const p of used) { const t = p.startsWith('remote:') ? REMOTE.get(p) : TR.get(p); if (!t) continue; for (const [m, u] of Object.entries(t.by)) add(by_model[m] = by_model[m] || { ...zero(), _p: 1 }, u); }
   let total = 0, anyP = false;
   for (const [m, u] of Object.entries(by_model)) { delete u._p; add(tot, u); const v = usd(u, m); u.usd_est = v; if (v !== null) { total += v; anyP = true; } }
   const cost = { total_usd_est: anyP ? Math.round(total * 1e6) / 1e6 : null, tokens_total: tot.input + tot.output + tot.cache_read + tot.cache_write, by_model };
@@ -623,7 +651,7 @@ function send(res, status, obj) {
   res.end(body);
 }
 function hostAllowed(req) {
-  const ok = (h) => /^(127\.0\.0\.1|localhost)$/.test(h);
+  const ok = (h) => /^(127\.0\.0\.1|localhost)$/.test(h) || ALLOWED_HOSTS.has(h.toLowerCase());
   try {
     if (!ok(new URL('http://' + (req.headers.host || '')).hostname)) return false;
     if (req.headers.origin && !ok(new URL(req.headers.origin).hostname)) return false;

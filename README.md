@@ -177,6 +177,12 @@ make                # lists every target (test, build, start/stop, statusline, u
 
 Then open http://127.0.0.1:4318 (the monitor starts automatically with a session; set `AOS_NO_AUTOSTART=1` to disable). New sessions pick up the hooks; existing ones need `/reload-plugins`. Project grouping, alerts and the stuck/errored rules can be tuned in the monitor's `live/config.json` (see `plugin/README.md`). Status: personal project, macOS-first. Licensed under the [MIT License](LICENSE).
 
+### Several machines: the hub
+
+To see every machine in one place, run the hub on a server and the shipper on each machine: `make ship
+URL=https://<hub>/ingest`. Paths are reduced to project-relative form and token counts are computed on the machine
+before anything is sent. See [hub/README.md](hub/README.md).
+
 ## Debugging
 
 Open http://127.0.0.1:4318/?debug=1 to show a small on-screen recorder (`ui/debug.js`) that logs layout, canvas, visibility and frame-rate changes with Copy/Clear buttons. It is inert without the flag and never changes the page.
